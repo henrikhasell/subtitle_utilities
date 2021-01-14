@@ -5,7 +5,7 @@ Subtitle utilities for streaming video to a Samsung TV.
 ## Who is this software for?
 
 * Do you stream video on your network via DLNA?
-* Do you have a Samsung TB?
+* Do you have a Samsung TV?
 
 Then this software is for you!
 Samsung TV does not recognize `SRT` subtitles, unless they are encoded in a very particilar fashion.
