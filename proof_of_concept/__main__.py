@@ -142,13 +142,6 @@ class Movie:
     def find_subtitles(self: object) -> List[Stream]:
         return list(filter(lambda i: i.is_valid_subtitle(), self.streams))
 
-    def missing_subtitles(
-        self: object,
-        wanted_languages: List[Language]
-    ) -> Set[Language]:
-        existing_languages = set(i.language for i in self.subtitles)
-        return set(i for i in wanted_languages if i not in existing_languages)
-
 
 class ExternalSubtitle:
     def __init__(self: object, language: Optional[Language], name: str, path: str):
@@ -202,7 +195,6 @@ class Analyser:
         movie_dir: str,
         subtitle_dir: str
     ):
-        self.wanted_languages = wanted_languages
         self.subtitle_map = {}
 
         for subtitle in self.find_external_subtitles(subtitle_dir):
@@ -250,8 +242,6 @@ class Analyser:
         
             command += ['-scodec', 'copy']
             command += [output_path]
-            print(command)
-            continue
         
             result = subprocess.run(command)
             result.check_returncode()
