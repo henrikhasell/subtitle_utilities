@@ -113,10 +113,20 @@ def load_stream(stream_json: dict) -> Stream:
 
 
 class Movie:
+    filename_patterns = [
+        re.compile(r'(?P<name>.+)( subtitles)\.(?P<type>.+)'),
+        re.compile(r'(?P<name>.+)\.(?P<type>.+)')
+    ]
+
     def __init__(self: object, path: str):
-        file_name = path.split('/')[-1]
-        match = re.match(r'(?P<name>.+)\.(?P<type>.+)', file_name)
-        groupdict = match.groupdict()
+        filename = path.split('/')[-1]
+
+        for pattern in Movie.filename_patterns:
+            match = pattern.match(filename)
+
+            if match:
+                groupdict = match.groupdict()
+                break
 
         self.path = path
         self.name = groupdict['name']
@@ -186,15 +196,11 @@ class Analyser:
 
     def get_subtitle_path(self: object, movie_name: str, language: Language) -> Optional[str]:
         try:
-            return self.subtitle_map[movie_name][language.part1]
+            return self.subtitle_map[movie_name].get(language)
         except KeyError:
             return None
 
-    def __init__(
-        self: object,
-        movie_dir: str,
-        subtitle_dir: str
-    ):
+    def build_subtitle_map(self: object, subtitle_dir: str) -> None:
         self.subtitle_map = {}
 
         for subtitle in self.find_external_subtitles(subtitle_dir):
@@ -202,21 +208,45 @@ class Analyser:
                 self.subtitle_map[subtitle.name] = {}
 
             if subtitle.language:
-                language = subtitle.language.part1
+                language = subtitle.language
             else:
-                language = 'en'
+                language = Language.from_string('en')
 
             self.subtitle_map[subtitle.name][language] = subtitle.path
 
-        for movie in self.find_movies(movie_dir):
-            available_languages = list(map(Language.from_string,
-                self.subtitle_map.get(movie.name, [])))
+    def build_movie_map(self: object, movie_dir: str) -> None:
+        self.movie_map = {}
 
+        for movie in self.find_movies(movie_dir):
             existing_languages = set(
                 [i.language for i in movie.find_subtitles()])
 
+            if movie.name not in self.movie_map:
+                self.movie_map[movie.name] = set()
+
+            for language in existing_languages:
+                self.movie_map[movie.name].add(language)
+
+    def __init__(
+        self: object,
+        movie_dir: str,
+        subtitle_dir: str
+    ):
+        self.build_subtitle_map(subtitle_dir)
+        self.build_movie_map(movie_dir)
+
+        for movie in self.find_movies(movie_dir):
             missing_languages = list(filter(
-                lambda i: i not in existing_languages, available_languages))
+                lambda i: i not in self.movie_map[movie.name],
+                self.subtitle_map.get(movie.name, [])
+            ))
+
+            existing_languages = self.movie_map[movie.name]
+            available_languages = list(self.subtitle_map[movie.name])
+
+            missing_languages = list(filter(
+                lambda i: i not in existing_languages,
+                available_languages))
 
             if not missing_languages:
                 continue
@@ -242,13 +272,13 @@ class Analyser:
         
             command += ['-scodec', 'copy']
             command += [output_path]
-        
+
             result = subprocess.run(command)
             result.check_returncode()
 
 
 if __name__ == '__main__':
     analyser = Analyser(
-        '/mnt/nas/pi.croydon.vpn/radarr',
-        '/mnt/nas/pi.croydon.vpn/bazarr'
+        '/mnt/nfs/pi.croydon.vpn/radarr',
+        '/mnt/nfs/pi.croydon.vpn/bazarr'
     )
