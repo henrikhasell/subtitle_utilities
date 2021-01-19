@@ -183,7 +183,7 @@ class Analyser:
     ) -> Generator[Movie, None, None]:
         for file_extension in ['mkv', 'mp4']:
             glob_string = f'{movie_dir}/**/*.{file_extension}' 
-            for glob_result in glob(glob_string):
+            for glob_result in glob(glob_string, recursive=True):
                 yield Movie(glob_result)
 
     def find_external_subtitles(
