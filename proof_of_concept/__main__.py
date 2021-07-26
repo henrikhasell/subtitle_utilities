@@ -1,11 +1,10 @@
 import os
 import re
 import json
-import subprocess
 from argparse import ArgumentParser
-from collections import defaultdict
 from enum import Enum
 from glob import glob
+from subprocess import DEVNULL, PIPE, Popen, run, SubprocessError
 from typing import Dict, Generator, List, Optional, Set, Tuple
 
 from iso639 import languages
@@ -60,7 +59,7 @@ class Language:
 
     @staticmethod
     def from_string(string: str):
-        for key in ['part1', 'part2t', 'part2b']:
+        for key in ['name', 'part1', 'part2t', 'part2b']:
             try:
                 language = languages.get(**{key: string})
             except KeyError:
@@ -74,18 +73,23 @@ class Language:
             )
 
 
+DEFAULT_LANGUAGE = Language.from_string('eng')
+
+
 class Stream:
     def __init__(
         self: object,
         index: int,
         codec_name: str,
         codec_type: CodecType,
-        language: Optional[Language]
+        language: Optional[Language],
+        attached_pic: bool
     ):
         self.index = index
         self.codec_name = codec_name
         self.codec_type = codec_type
         self.language = language
+        self.attached_pic = attached_pic
 
     def is_valid_subtitle(self: object):
         return self.codec_type == CodecType.Subtitle and \
@@ -97,40 +101,36 @@ class Stream:
 
 
 def load_stream(stream_json: dict) -> Stream:
-        stream_tags = stream_json.get('tags')
+        stream_tags = stream_json.get('tags', {})
+        stream_dispositions = stream_json.get('disposition', {})
 
-        if stream_tags:
-            language_string = stream_tags.get('language')
-        else:
-            language_string = None
+        attached_pic = bool(stream_dispositions.get('attached_pic', False))
+        language_string = stream_tags.get('language', None)
 
         return Stream(
             stream_json['index'],
             stream_json['codec_name'],
             CodecType(stream_json['codec_type']),
-            language_string and Language.from_string(language_string)
+            language_string and Language.from_string(language_string),
+            attached_pic
         )
 
 
 class Movie:
-    filename_patterns = [
-        re.compile(r'(?P<name>.+)( subtitles)\.(?P<type>.+)'),
-        re.compile(r'(?P<name>.+)\.(?P<type>.+)')
-    ]
+    filename_pattern = re.compile(r'(?P<name>.+)\.(?P<type>.+)')
 
     def __init__(self: object, path: str):
-        filename = path.split('/')[-1]
+        split = path.split('/')
 
-        for pattern in Movie.filename_patterns:
-            match = pattern.match(filename)
+        filename = split[-1]
 
-            if match:
-                groupdict = match.groupdict()
-                break
+        match = Movie.filename_pattern.match(filename)
+        groupdict = match.groupdict()
 
         self.path = path
         self.name = groupdict['name']
         self.type = groupdict['type']
+        self.directory = split[-2]
 
         self.streams = self.find_streams()
         self.subtitles = self.find_subtitles()
@@ -143,7 +143,7 @@ class Movie:
             self.path
         ]
 
-        result = subprocess.run(command, capture_output=True)
+        result = run(command, capture_output=True)
         result.check_returncode()
 
         result_output = json.loads(result.stdout)
@@ -151,6 +151,9 @@ class Movie:
 
     def find_subtitles(self: object) -> List[Stream]:
         return list(filter(lambda i: i.is_valid_subtitle(), self.streams))
+
+    def output_path(self: object, output_dir: str) -> str:
+        return f'{output_dir}/{self.directory}/{self.name} subtitles.mkv'
 
 
 class ExternalSubtitle:
@@ -176,6 +179,12 @@ class ExternalSubtitle:
         )
 
 
+def get_language(language: Optional[Language]) -> str:
+    if language is None:
+        language = DEFAULT_LANGUAGE
+    return language.part2b
+
+
 class Analyser:
     def find_movies(
         self: object,
@@ -184,6 +193,8 @@ class Analyser:
         for file_extension in ['mkv', 'mp4']:
             glob_string = f'{movie_dir}/**/*.{file_extension}' 
             for glob_result in glob(glob_string, recursive=True):
+                if 'subtitles' in glob_result:
+                    continue # todo: remove this once restarting the NAS
                 yield Movie(glob_result)
 
     def find_external_subtitles(
@@ -214,71 +225,124 @@ class Analyser:
 
             self.subtitle_map[subtitle.name][language] = subtitle.path
 
-    def build_movie_map(self: object, movie_dir: str) -> None:
-        self.movie_map = {}
-
-        for movie in self.find_movies(movie_dir):
-            existing_languages = set(
-                [i.language for i in movie.find_subtitles()])
-
-            if movie.name not in self.movie_map:
-                self.movie_map[movie.name] = set()
-
-            for language in existing_languages:
-                self.movie_map[movie.name].add(language)
-
     def __init__(
         self: object,
         movie_dir: str,
+        output_dir: str,
         subtitle_dir: str
     ):
         self.build_subtitle_map(subtitle_dir)
-        self.build_movie_map(movie_dir)
 
         for movie in self.find_movies(movie_dir):
-            missing_languages = list(filter(
-                lambda i: i not in self.movie_map[movie.name],
-                self.subtitle_map.get(movie.name, [])
-            ))
+            output_path = movie.output_path(output_dir)
 
-            existing_languages = self.movie_map[movie.name]
-            available_languages = list(self.subtitle_map[movie.name])
+            if os.path.isfile(output_path):
+                existing_movie = Movie(output_path)
+                existing_languages = [i.language for i in existing_movie.subtitles]
 
-            missing_languages = list(filter(
-                lambda i: i not in existing_languages,
-                available_languages))
+                try:
+                    missing_subtitles = [i for i in self.subtitle_map[movie.name] if i not in existing_languages]
+                except KeyError:
+                    missing_subtitles = []
 
-            if not missing_languages:
-                continue
+                if missing_subtitles:
+                    print(f'{movie.name} is missing {", ".join(i.name for i in missing_subtitles)}')
+                    answer = input(f'Do you want to overwrite {output_path} with new languages? ')
+                    if answer.lower() not in {'y', 'yes'}:
+                        continue
+                    os.remove(output_path)
+                else:
+                    print(f'Output file "{output_path}" already exists, skipping...')
+                    continue
 
-            output_directory = '/'.join(movie.path.split('/')[0:-1])
-            output_path = f'{output_directory}/{movie.name} subtitles.mkv'
+            existing_languages = [i.language for i in movie.subtitles]
+            available_languages = list(self.subtitle_map.get(movie.name, []))
 
-            command = ['ffmpeg', '-i', movie.path]
+            missing_languages = [i for i in available_languages if i not in existing_languages]
+
+            output_path_parent = '/'.join(output_path.split('/')[:-1])
+            os.makedirs(output_path_parent, exist_ok=True)
+
+            command = ['ffmpeg', '-i', 'pipe:0']
         
             for language in missing_languages:
                 subtitle_path = self.get_subtitle_path(movie.name, language)
                 command += ['-i', subtitle_path]
-        
-            for stream in filter(lambda i: i.is_valid_stream(), movie.streams):
+
+            video_streams = [i for i in movie.streams if \
+                i.codec_type == CodecType.Video and not i.attached_pic]
+
+            audio_streams = [i for i in movie.streams if \
+                i.codec_type == CodecType.Audio]
+
+            for index, stream in enumerate(video_streams):
                 command += ['-map', f'0:{stream.index}']
+                command += [f'-c:v:{index}', 'libx265']
+
+            for stream in audio_streams:
+                command += ['-map', f'0:{stream.index}']
+
+            for index, stream in enumerate(movie.subtitles):
+                language = get_language(stream.language)
+
+                command += ['-map', f'0:{stream.index}']
+                command += [f'-metadata:s:s:{index}', f'language={language}']
+                command += [f'-c:s:{index}', stream.codec_name]
+
+                if stream.language == DEFAULT_LANGUAGE:
+                     command += [f'-disposition:s:{index}', 'default']
         
-            for index , _value in enumerate(missing_languages):
+            for index, language  in enumerate(missing_languages):
                 command += ['-map', f'{index + 1}:s']
-        
-            for index, language in enumerate(missing_languages):
+
                 offset = len(movie.subtitles) + index
-                command += [f'-metadata:s:s:{offset}', f'language={language.part2b}']
-        
-            command += ['-scodec', 'copy']
+
+                command += [f'-metadata:s:s:{offset}', f'language={get_language(language)}']
+                command += [f'-c:s:{offset}', 'subrip']
+
+                if language == DEFAULT_LANGUAGE:
+                     command += [f'-disposition:s:{offset}', 'default']
+
+            attached_pics = [i for i in movie.streams if \
+                i.codec_type == CodecType.Video and i.attached_pic]
+
+            for index, stream in enumerate(attached_pics):
+                command += ['-map', f'0:{stream.index}']
+
+                offset = len(video_streams) + index
+
+                command += [f'-c:v:{offset}', stream.codec_name]
+                command += [f'-disposition:v:{offset}', 'attached_pic']
+
+            # Commenting this out because we are using h265 encoding, for now.
+            # # h264 needs even dimensions, No Country for Old Men does not have them.
+            # # This rounds video dimensions up to the nearest even pixel number.
+            # command += ['-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2']
+
             command += [output_path]
 
-            result = subprocess.run(command)
-            result.check_returncode()
+            print(f'Adding {", ".join(i.name for i in missing_languages)} subtitles to "{movie.name}"...')
+
+            try:
+                pv_command = Popen(['pv', movie.path], stdout=PIPE)
+                result = run(command, encoding='utf-8', stderr=PIPE, stdin=pv_command.stdout)
+                result.check_returncode()
+            except (KeyboardInterrupt, SubprocessError) as error:
+                print(f'Process was interrupted, deleting "{output_path}"...')
+                try:
+                    os.remove(output_path)
+                except FileNotFoundError:
+                    pass
+                if isinstance(error, SubprocessError):
+                    print(result.stderr)
+                    raise error
+                break
+
 
 
 if __name__ == '__main__':
     analyser = Analyser(
-        '/mnt/nfs/pi.croydon.vpn/radarr',
-        '/mnt/nfs/pi.croydon.vpn/bazarr'
+        '/mnt/nfs/radarr',
+        '/mnt/nfs/radarr_subtitles',
+        '/mnt/nfs/bazarr'
     )
